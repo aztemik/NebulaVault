@@ -24,7 +24,7 @@ from .firebaseLogic import AuthFire
 
 from .legalTexts import WelcomeScreen
 
-from .pantallaPrincipal import PantallaPrincipal
+from .bovedaScreen import BovedaScreen
 # ═════════════════════════════════════════════════════════════════════════════
 #  PALETA NÉBULAVAULT — DESIGN TOKENS
 # ═════════════════════════════════════════════════════════════════════════════
@@ -611,11 +611,10 @@ class PantallaCloud:
         """
         Ejecutado después de que WelcomeScreen llama a on_accepted
         (la aceptación ya quedó guardada en Firestore por WelcomeScreen).
-        Destruye la ventana de login y abre la app principal.
+        La ventana de login se destruye dentro de _abrir_app_principal.
         """
-        self.root.destroy()
         self._abrir_app_principal(datos_usuario)
- 
+
     def _on_rechazo_terminos(self) -> None:
         """
         Ejecutado si el usuario rechaza los términos en WelcomeScreen.
@@ -628,11 +627,13 @@ class PantallaCloud:
         )
         # Limpiar la contraseña por seguridad
         self._f_pass.limpiar()
- 
+
     # ── Navegación a la pantalla principal ───────────────────────────────────
- 
+
     def _abrir_app_principal(self, datos_usuario: dict) -> None:
-        PantallaPrincipal(datos_usuario)
+        """Destruye la ventana de login y abre la pantalla de bóvedas."""
+        self.root.destroy()
+        BovedaScreen(datos_usuario)
  
 
 
