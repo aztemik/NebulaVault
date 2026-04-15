@@ -411,6 +411,17 @@ class PantallaCloud:
         if self._modo == "registro":
             self._construir_panel_registro(px, y_inicio=528)
 
+        # ── Enlace volver al selector de entorno ──────────────────────────
+        lbl_volver = tk.Label(
+            self.root, text="← Volver",
+            bg=BG_VOID, fg=TEXT_MUTED,
+            font=FONT_FAINT, cursor="hand2",
+        )
+        lbl_volver.place(x=24, y=alto - 44)
+        lbl_volver.bind("<Button-1>", lambda _: self._volver_inicio())
+        lbl_volver.bind("<Enter>",    lambda _: lbl_volver.config(fg=ACCENT_PURPLE))
+        lbl_volver.bind("<Leave>",    lambda _: lbl_volver.config(fg=TEXT_MUTED))
+
         # ── Footer ────────────────────────────────────────────────────────
         self._bg.create_text(cw//2, alto - 26,
                              text="v1.0.0  //  CLOUD SECURE AUTH  //  CONFIDENTIAL",
@@ -721,6 +732,13 @@ class PantallaCloud:
         """Destruye la ventana de login y abre la pantalla de bóvedas."""
         self.root.destroy()
         BovedaScreen(datos_usuario)
+
+    def _volver_inicio(self) -> None:
+        """Regresa a la pantalla de selección de entorno (On-Premises / Cloud)."""
+        for w in self.root.winfo_children():
+            w.destroy()
+        from views.WelcomeScreen import WelcomeScreen as PantallaInicio
+        PantallaInicio(self.root)
  
 
 

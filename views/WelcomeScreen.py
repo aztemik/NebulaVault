@@ -57,11 +57,11 @@ FONT_BTN       = ("Courier New", 11, "bold")
 # ═════════════════════════════════════════════════════════════════════════════
 
 def abrir_pantalla_on_premises(root: tk.Tk) -> None:
-    """
-    Abre la pantalla correspondiente al modo On-Premises.
-    TODO: implementar la lógica de navegación.
-    """
-    pass
+    """Abre la pantalla de selección de directorio para modo On-Premises."""
+    for widget in root.winfo_children():
+        widget.destroy()
+    from views.onPremisesPath import OnPremisesPath
+    OnPremisesPath(root)
 
 
 def abrir_pantalla_nube(root: tk.Tk) -> None:

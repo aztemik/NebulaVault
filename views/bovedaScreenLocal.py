@@ -1,49 +1,53 @@
 """
-views/bovedaScreen.py
+views/bovedaScreenLocal.py
 ════════════════════════════════════════════════════════════════════════════
-NébulaVault — Pantalla de Bóvedas (solo UI / presentación).
+NébulaVault — Pantalla de Bóvedas para modo On-Premises.
 
-Toda la lógica de negocio y persistencia se delega a:
-    services/bovedas.py   — CRUD de bóvedas en Firestore
-    services/entradas.py  — CRUD de entradas en Firestore
-    services/crypto.py    — cifrado / descifrado con Fernet
+Réplica de bovedaScreen.py con las siguientes diferencias:
+  · Persistencia en SQLite local (services/local_storage.py) en vez de
+    Firestore. No hay UID de usuario.
+  · Cada bóveda tiene su propio salt aleatorio de 16 bytes; la clave
+    Fernet se deriva de password + salt (no de password + uid).
+  · No hay pantalla de perfil; el botón "← SALIR" regresa al WelcomeScreen.
+  · El footer muestra la ruta al archivo .db en vez del nombre de usuario.
 
-Layout:
+Layout idéntico a bovedaScreen.py:
   ┌─────────────┬──────────────────────────────────────────────┐
   │  MIS        │  ⬡ <Nombre bóveda>          [⊘ ELIMINAR]    │
   │  BÓVEDAS    │  ───────────────────────────────────────────  │
   │             │  [⊕ NUEVA ENTRADA]                            │
-  │  [Bóveda 1] │                                               │
-  │  [Bóveda 2] │  ┌─ correo ────────────────┐  [editar]       │
-  │  …          │  │  •••••••  [ ver ]        │  [eliminar]     │
-  │             │  │  nota…                   │                 │
-  │  [⊕ NUEVA   │  ┌─ Formulario inline ─────────────────────┐ │
-  │   BÓVEDA]   │  │  CORREO | CONTRASEÑA | NOTA              │ │
-  │             │  │  [✔ GUARDAR]  [✕ CANCELAR]               │ │
+  │  [Bóveda 1] │  ┌─ correo ──────────────┐  [editar]         │
+  │  [Bóveda 2] │  │  •••••••  [ ver ]      │  [eliminar]       │
+  │  …          │  │  nota…                 │                   │
+  │  [⊕ NUEVA   │  ┌─ Formulario inline ───────────────────┐   │
+  │   BÓVEDA]   │  │  CORREO | CONTRASEÑA | NOTA            │   │
+  │             │  │  [✔ GUARDAR]  [✕ CANCELAR]             │   │
   └─────────────┴──────────────────────────────────────────────┘
 ════════════════════════════════════════════════════════════════════════════
 """
 
 import math
+import os
 import tkinter as tk
 from tkinter import messagebox
 
 from cryptography.fernet import Fernet
 
-from services.crypto   import (cifrar, descifrar,
-                                get_fernet_boveda,
-                                hashear_password_boveda,
-                                verificar_password_boveda,
-                                cifrar_password_con_respuesta,
-                                descifrar_password_con_respuesta)
-from services.bovedas  import (cargar_bovedas, crear_boveda, eliminar_boveda,
-                                actualizar_intentos_boveda,
-                                bloquear_boveda_permanente,
-                                resetear_bloqueo_boveda)
-from services.entradas import (cargar_entradas, crear_entrada,
-                                actualizar_entrada, eliminar_entrada,
-                                contar_entradas)
-from views.profileScreen import ProfileScreen
+from services.crypto import (
+    cifrar, descifrar,
+    hashear_password_boveda,
+    verificar_password_boveda,
+)
+from services.local_storage import (
+    cargar_bovedas, crear_boveda, eliminar_boveda,
+    actualizar_intentos_boveda, bloquear_boveda_permanente,
+    resetear_bloqueo_boveda,
+    cargar_entradas, crear_entrada, actualizar_entrada,
+    eliminar_entrada, contar_entradas,
+    get_fernet_local,
+    cifrar_password_con_respuesta_local,
+    descifrar_password_con_respuesta_local,
+)
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  PALETA NÉBULAVAULT
@@ -64,7 +68,7 @@ BTN_ACTIVE    = "#0369a1"
 BTN_HOVER     = "#0284c7"
 CYAN_20       = "#0f2535"
 
-INACTIVITY_TIMEOUT_MS = 1 * 60 * 1000   # 5 minutos sin actividad → cierre de sesión
+INACTIVITY_TIMEOUT_MS = 1 * 60 * 1000   # 5 minutos sin actividad → regresa al selector de ruta
 
 FONT_TITLE    = ("Courier New", 11, "bold")
 FONT_SUBTITLE = ("Courier New",  9, "bold")
@@ -72,6 +76,19 @@ FONT_LABEL    = ("Courier New",  9, "normal")
 FONT_FAINT    = ("Courier New",  8, "normal")
 FONT_BTN      = ("Courier New",  9, "bold")
 FONT_INPUT    = ("Courier New", 10, "normal")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  PREGUNTAS DE SEGURIDAD
+# ═══════════════════════════════════════════════════════════════════════════
+
+PREGUNTAS_SEGURIDAD = [
+    "¿Cuál es tu materia favorita de la universidad?",
+    "¿Cuál es el nombre de tu primera mascota?",
+    "¿En qué ciudad naciste?",
+    "¿Cuál es el nombre de tu escuela primaria?",
+    "¿Cuál es tu película favorita de la infancia?",
+]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -155,42 +172,32 @@ class NVEntry(tk.Frame):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  PREGUNTAS DE SEGURIDAD PREDEFINIDAS
+#  PANTALLA DE BÓVEDAS LOCAL
 # ═══════════════════════════════════════════════════════════════════════════
 
-PREGUNTAS_SEGURIDAD = [
-    "¿Cuál es tu materia favorita de la universidad?",
-    "¿Cuál es el nombre de tu primera mascota?",
-    "¿En qué ciudad naciste?",
-    "¿Cuál es el nombre de tu escuela primaria?",
-    "¿Cuál es tu película favorita de la infancia?",
-]
+class BovedaScreenLocal:
+    """
+    Pantalla de gestión de bóvedas para modo On-Premises.
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  PANTALLA DE BÓVEDAS
-# ═══════════════════════════════════════════════════════════════════════════
-
-class BovedaScreen:
+    Parámetros:
+        db_path — ruta completa al archivo nebulavault.db.
+    """
 
     W      = 1100
     H      = 660
     LEFT_W = 290
 
-    def __init__(self, datos_usuario: dict) -> None:
-        self._datos  = datos_usuario
-        self._uid    = datos_usuario.get("localId", "")
-        # La clave Fernet es por bóveda; se inicializa al desbloquear una.
+    def __init__(self, db_path: str) -> None:
+        self._db_path = db_path
         self._fernet: Fernet | None = None
-
-        self._bovedas:          list[dict]       = []
-        self._boveda_sel:       dict | None      = None
-        self._entradas:         list[dict]       = []
-        self._conteos:          dict[str, int]   = {}   # boveda_id → nº entradas
-        self._form_modo:        str | None       = None  # "nueva_entrada" | "editar_entrada"
-        self._entrada_editando: dict | None      = None
-
         self._inactivity_id: str | None = None
+
+        self._bovedas:          list[dict]     = []
+        self._boveda_sel:       dict | None    = None
+        self._entradas:         list[dict]     = []
+        self._conteos:          dict[str, int] = {}
+        self._form_modo:        str | None     = None
+        self._entrada_editando: dict | None    = None
 
         self._root = tk.Tk()
         self._configurar()
@@ -199,22 +206,20 @@ class BovedaScreen:
         self._iniciar_inactividad()
         self._root.mainloop()
 
-    # ── Configuración de la ventana ────────────────────────────────────────
+    # ── Configuración ─────────────────────────────────────────────────────
 
     def _configurar(self) -> None:
-        nombre = (self._datos.get("displayName") or
-                  self._datos.get("email", "usuario").split("@")[0])
-        self._root.title(f"NébulaVault — Bóvedas · {nombre}")
+        self._root.title("NébulaVault — On-Premises · Bóvedas")
         self._root.configure(bg=BG_VOID)
         self._root.resizable(False, False)
         sw = self._root.winfo_screenwidth()
         sh = self._root.winfo_screenheight()
         self._root.geometry(
-            f"{self.W}x{self.H}+{(sw-self.W)//2}+{(sh-self.H)//2}"
+            f"{self.W}x{self.H}+{(sw - self.W) // 2}+{(sh - self.H) // 2}"
         )
 
     # ══════════════════════════════════════════════════════════════════════
-    #  ESQUELETO DE LA PANTALLA (construido una sola vez)
+    #  ESQUELETO
     # ══════════════════════════════════════════════════════════════════════
 
     def _construir_esqueleto(self) -> None:
@@ -226,30 +231,31 @@ class BovedaScreen:
         self._bg.place(x=0, y=0)
         self._dibujar_fondo()
 
-        # ── Panel izquierdo ──────────────────────────────────────────────
+        # ── Panel izquierdo ───────────────────────────────────────────
         self._left = tk.Frame(self._root, bg=BG_PANEL,
                               highlightthickness=1,
                               highlightbackground=BORDER_DARK)
         self._left.place(x=14, y=14, width=LW, height=H - 28)
         self._left.pack_propagate(False)
 
+        # Cabecera izquierda
         hdr = tk.Frame(self._left, bg=BG_PANEL)
         hdr.pack(fill="x", padx=10, pady=(10, 6))
         tk.Label(hdr, text="◈  MIS BÓVEDAS", bg=BG_PANEL,
                  fg=ACCENT_CYAN, font=FONT_TITLE).pack(side="left")
 
-        lbl_perfil = tk.Label(
-            hdr, text="👤 Mi perfil",
+        lbl_salir = tk.Label(
+            hdr, text="← Salir",
             bg=BG_PANEL, fg=TEXT_MUTED, font=FONT_FAINT, cursor="hand2",
         )
-        lbl_perfil.pack(side="right")
-        lbl_perfil.bind("<Button-1>", lambda _: self._abrir_perfil())
-        lbl_perfil.bind("<Enter>", lambda _: lbl_perfil.config(fg=ACCENT_CYAN))
-        lbl_perfil.bind("<Leave>", lambda _: lbl_perfil.config(fg=TEXT_MUTED))
+        lbl_salir.pack(side="right")
+        lbl_salir.bind("<Button-1>", lambda _: self._salir())
+        lbl_salir.bind("<Enter>", lambda _: lbl_salir.config(fg=LOCK_RED))
+        lbl_salir.bind("<Leave>", lambda _: lbl_salir.config(fg=TEXT_MUTED))
 
         tk.Frame(self._left, bg=BORDER_DARK, height=1).pack(fill="x", padx=10)
 
-        # Área scrollable para la lista de bóvedas
+        # Área scrollable
         wrap = tk.Frame(self._left, bg=BG_PANEL)
         wrap.pack(fill="both", expand=True, padx=4, pady=6)
 
@@ -267,12 +273,12 @@ class BovedaScreen:
         self._inner_bovedas.bind(
             "<Configure>",
             lambda e: self._cv_bovedas.configure(
-                scrollregion=self._cv_bovedas.bbox("all"))
+                scrollregion=self._cv_bovedas.bbox("all")),
         )
         self._cv_bovedas.bind(
             "<MouseWheel>",
             lambda e: self._cv_bovedas.yview_scroll(
-                -1 * (e.delta // 120), "units")
+                -1 * (e.delta // 120), "units"),
         )
 
         tk.Frame(self._left, bg=BORDER_DARK, height=1).pack(fill="x", padx=10)
@@ -284,7 +290,7 @@ class BovedaScreen:
                  comando=self._dialogo_nueva_boveda,
                  ancho=LW - 20, alto=34).pack()
 
-        # ── Panel derecho ────────────────────────────────────────────────
+        # ── Panel derecho ─────────────────────────────────────────────
         RW = W - LW - 36
         self._right = tk.Frame(self._root, bg=BG_PANEL,
                                highlightthickness=1,
@@ -292,7 +298,7 @@ class BovedaScreen:
         self._right.place(x=LW + 22, y=14, width=RW, height=H - 28)
         self._right.pack_propagate(False)
 
-        # Cabecera del panel derecho
+        # Cabecera derecha
         self._hdr_r = tk.Frame(self._right, bg=BG_PANEL)
         self._hdr_r.pack(fill="x", padx=12, pady=(10, 6))
 
@@ -310,22 +316,22 @@ class BovedaScreen:
             comando=self._on_eliminar_boveda,
             ancho=180, alto=28,
         )
-        # Visible solo cuando hay bóveda seleccionada
 
         tk.Frame(self._right, bg=BORDER_DARK, height=1).pack(fill="x", padx=12)
 
-        # Contenedor dinámico de entradas (se vacía y reconstruye)
+        # Contenedor dinámico
         self._content = tk.Frame(self._right, bg=BG_PANEL)
         self._content.pack(fill="both", expand=True)
 
         self._mostrar_placeholder()
 
-        # Footer
-        nombre = (self._datos.get("displayName") or
-                  self._datos.get("email", "").split("@")[0])
+        # Footer con ruta del archivo .db
+        ruta_corta = self._db_path
+        if len(ruta_corta) > 72:
+            ruta_corta = "…" + ruta_corta[-70:]
         tk.Label(
             self._root,
-            text=f"v1.0.0  //  {nombre.upper()}  //  NÉBULAVAULT  //  CONFIDENTIAL",
+            text=f"ON-PREMISES  //  {ruta_corta}",
             bg=BG_VOID, fg=TEXT_FAINT, font=FONT_FAINT,
         ).place(x=W // 2, y=H - 10, anchor="center")
 
@@ -377,28 +383,26 @@ class BovedaScreen:
 
     def _cargar_bovedas(self) -> None:
         try:
-            self._bovedas = cargar_bovedas(self._uid)
+            self._bovedas = cargar_bovedas(self._db_path)
         except Exception as exc:
             messagebox.showerror("NébulaVault",
                                  f"Error al cargar bóvedas:\n{exc}",
                                  parent=self._root)
             self._bovedas = []
-        # Cargar conteo de entradas por bóveda (no requiere descifrar)
+
         for b in self._bovedas:
             try:
-                self._conteos[b["id"]] = contar_entradas(self._uid, b["id"])
+                self._conteos[b["id"]] = contar_entradas(self._db_path, b["id"])
             except Exception:
                 self._conteos[b["id"]] = 0
+
         self._renderizar_lista_bovedas()
 
     def _dialogo_nueva_boveda(self) -> None:
         """
-        Toplevel con campos de nombre, contraseña y pregunta de seguridad
-        para crear una nueva bóveda.
-
-        La contraseña es la clave de cifrado (PBKDF2 → Fernet).
-        La respuesta cifra una copia de esa contraseña para recuperación
-        ante bloqueo por intentos fallidos.
+        Toplevel para crear una nueva bóveda local.
+        Genera un salt aleatorio de 16 bytes y cifra la contraseña
+        con la respuesta de seguridad para recuperación ante bloqueo.
         """
         top = tk.Toplevel(self._root)
         top.title("Nueva bóveda")
@@ -411,11 +415,10 @@ class BovedaScreen:
         frm = tk.Frame(top, bg=BG_PANEL, padx=24, pady=18)
         frm.pack(fill="both", expand=True)
 
-        # ── Título ────────────────────────────────────────────────────────
         tk.Label(frm, text="⬡  NUEVA BÓVEDA", bg=BG_PANEL,
                  fg=ACCENT_CYAN, font=FONT_TITLE).pack(anchor="w", pady=(0, 10))
 
-        # ── Advertencia ───────────────────────────────────────────────────
+        # Advertencia
         warn = tk.Frame(frm, bg="#140d00",
                         highlightthickness=1, highlightbackground=ACCENT_GOLD)
         warn.pack(fill="x", pady=(0, 12))
@@ -429,10 +432,8 @@ class BovedaScreen:
                  bg="#140d00", fg=TEXT_MUTED, font=FONT_FAINT,
                  justify="left").pack(anchor="w", padx=10, pady=(0, 8))
 
-        # ── Separador ─────────────────────────────────────────────────────
         tk.Frame(frm, bg=BORDER_DARK, height=1).pack(fill="x", pady=(0, 10))
 
-        # ── Campos de contraseña ──────────────────────────────────────────
         f_nombre = NVEntry(frm, label="NOMBRE DE LA BÓVEDA",
                            acento=ACCENT_CYAN, ancho_px=400)
         f_nombre.pack(fill="x", pady=(0, 8))
@@ -445,10 +446,8 @@ class BovedaScreen:
                             acento=ACCENT_CYAN, ancho_px=400)
         f_confirm.pack(fill="x")
 
-        # ── Separador ─────────────────────────────────────────────────────
         tk.Frame(frm, bg=BORDER_DARK, height=1).pack(fill="x", pady=(12, 8))
 
-        # ── Pregunta de seguridad ─────────────────────────────────────────
         tk.Label(frm, text="PREGUNTA DE SEGURIDAD", bg=BG_PANEL,
                  fg=ACCENT_GOLD, font=FONT_SUBTITLE,
                  anchor="w").pack(anchor="w", pady=(0, 6))
@@ -472,12 +471,10 @@ class BovedaScreen:
                               acento=ACCENT_GOLD, ancho_px=400)
         f_respuesta.pack(fill="x")
 
-        # ── Error / estado ────────────────────────────────────────────────
         lbl_err = tk.Label(frm, text="", bg=BG_PANEL, fg=LOCK_RED,
                            font=FONT_FAINT, wraplength=400, justify="left")
         lbl_err.pack(pady=(6, 0), anchor="w")
 
-        # ── Botón ─────────────────────────────────────────────────────────
         def confirmar():
             nombre    = f_nombre.get().strip()
             pw        = f_pass.get()
@@ -507,7 +504,6 @@ class BovedaScreen:
 
         f_respuesta._entry.bind("<Return>", lambda _: confirmar())
         f_nombre._entry.focus_set()
-
         top.wait_visibility()
         top.grab_set()
 
@@ -516,23 +512,27 @@ class BovedaScreen:
         pregunta: str, respuesta: str,
     ) -> None:
         try:
-            pw_hash          = hashear_password_boveda(password)
-            pw_cifrada_resp  = cifrar_password_con_respuesta(
-                password, respuesta, self._uid
+            # Generar salt aleatorio de 16 bytes para esta bóveda
+            salt_bytes = os.urandom(16)
+            salt_hex   = salt_bytes.hex()
+
+            pw_hash         = hashear_password_boveda(password)
+            pw_cifrada_resp = cifrar_password_con_respuesta_local(
+                password, respuesta, salt_bytes
             )
             nueva = crear_boveda(
-                self._uid, nombre, pw_hash,
-                pregunta, pw_cifrada_resp,
+                self._db_path, nombre, pw_hash,
+                pregunta, pw_cifrada_resp, salt_hex,
             )
         except Exception as exc:
             messagebox.showerror("NébulaVault",
                                  f"Error al crear bóveda:\n{exc}",
                                  parent=self._root)
             return
+
         self._bovedas.append(nueva)
+        self._conteos[nueva["id"]] = 0
         self._renderizar_lista_bovedas()
-        # La bóveda recién creada se desbloquea directamente con la contraseña
-        # que acaba de ingresar el usuario — no hace falta pedirla de nuevo.
         self._desbloquear_boveda(nueva, password)
 
     def _on_eliminar_boveda(self) -> None:
@@ -547,15 +547,17 @@ class BovedaScreen:
         ):
             return
         try:
-            eliminar_boveda(self._uid, self._boveda_sel["id"])
+            eliminar_boveda(self._db_path, self._boveda_sel["id"])
         except Exception as exc:
             messagebox.showerror("NébulaVault",
                                  f"Error al eliminar bóveda:\n{exc}",
                                  parent=self._root)
             return
+
         self._bovedas   = [b for b in self._bovedas
                            if b["id"] != self._boveda_sel["id"]]
         self._boveda_sel = None
+        self._fernet     = None
         self._entradas   = []
         self._renderizar_lista_bovedas()
         self._lbl_boveda.config(text="Selecciona o crea una bóveda",
@@ -563,7 +565,6 @@ class BovedaScreen:
         self._mostrar_placeholder()
 
     def _seleccionar_boveda(self, boveda: dict) -> None:
-        """Al hacer clic en una bóveda evalúa su estado y actúa en consecuencia."""
         if boveda.get("boveda_inaccesible", False):
             messagebox.showerror(
                 "Bóveda inaccesible",
@@ -579,9 +580,9 @@ class BovedaScreen:
 
     def _dialogo_desbloquear(self, boveda: dict) -> None:
         """
-        Toplevel que solicita la contraseña de la bóveda.
+        Solicita la contraseña de la bóveda.
 
-        Política de bloqueo (acumulada en Firestore):
+        Política de bloqueo:
           · 1er intento fallido  → mensaje de error
           · 2° intento fallido   → advertencia de último intento
           · 3er intento fallido  → bóveda bloqueada → diálogo de pregunta
@@ -613,7 +614,6 @@ class BovedaScreen:
                               font=FONT_FAINT, wraplength=340, justify="left")
         lbl_status.pack(pady=(6, 0), anchor="w")
 
-        # Advertencia previa si ya hay 2 intentos fallidos acumulados
         intentos_act = boveda.get("intentos_password", 0)
         if intentos_act == 2:
             lbl_status.config(
@@ -632,15 +632,13 @@ class BovedaScreen:
                 intentos_act += 1
                 bloquear = intentos_act >= 3
 
-                # Persistir en Firestore (best-effort)
                 try:
                     actualizar_intentos_boveda(
-                        self._uid, boveda["id"], intentos_act, bloquear
+                        self._db_path, boveda["id"], intentos_act, bloquear
                     )
                 except Exception:
                     pass
 
-                # Actualizar objeto local y lista
                 boveda["intentos_password"] = intentos_act
                 if bloquear:
                     boveda["boveda_bloqueada"] = True
@@ -661,7 +659,7 @@ class BovedaScreen:
 
                 if intentos_act == 1:
                     lbl_status.config(text="Contraseña incorrecta.", fg=LOCK_RED)
-                else:   # intentos_act == 2
+                else:
                     lbl_status.config(
                         text="⚠  Contraseña incorrecta.\n"
                              "Último intento disponible. Un fallo más bloqueará esta bóveda.",
@@ -669,9 +667,9 @@ class BovedaScreen:
                     )
                 return
 
-            # Contraseña correcta — resetear contador
+            # Contraseña correcta
             try:
-                actualizar_intentos_boveda(self._uid, boveda["id"], 0, False)
+                actualizar_intentos_boveda(self._db_path, boveda["id"], 0, False)
             except Exception:
                 pass
             boveda["intentos_password"] = 0
@@ -688,16 +686,14 @@ class BovedaScreen:
 
         f_pass._entry.bind("<Return>", lambda _: intentar())
         f_pass._entry.focus_set()
-
         top.wait_visibility()
         top.grab_set()
 
     def _dialogo_pregunta_seguridad(self, boveda: dict) -> None:
         """
-        Toplevel que muestra la pregunta de seguridad para desbloquear la bóveda
-        tras agotar los intentos de contraseña.
+        Muestra la pregunta de seguridad tras agotar los intentos.
 
-        · Respuesta correcta → resetea bloqueo y abre la bóveda directamente.
+        · Respuesta correcta  → resetea bloqueo y abre la bóveda.
         · Respuesta incorrecta → bóveda bloqueada permanentemente.
         """
         top = tk.Toplevel(self._root)
@@ -722,7 +718,6 @@ class BovedaScreen:
 
         tk.Frame(frm, bg=BORDER_DARK, height=1).pack(fill="x", pady=(0, 12))
 
-        # Mostrar la pregunta almacenada
         pregunta = boveda.get("pregunta_seguridad", "Pregunta no disponible.")
         tk.Label(frm, text=pregunta,
                  bg=BG_PANEL, fg=ACCENT_GOLD, font=FONT_LABEL,
@@ -742,15 +737,16 @@ class BovedaScreen:
                 lbl_err.config(text="Ingresa tu respuesta.")
                 return
 
-            token = boveda.get("password_cifrada_con_respuesta", "")
+            salt_bytes = bytes.fromhex(boveda.get("salt", ""))
+            token      = boveda.get("password_cifrada_con_respuesta", "")
             try:
-                pw_descifrado = descifrar_password_con_respuesta(
-                    token, respuesta, self._uid
+                pw_descifrado = descifrar_password_con_respuesta_local(
+                    token, respuesta, salt_bytes
                 )
             except ValueError:
                 # Respuesta incorrecta → bloqueo permanente
                 try:
-                    bloquear_boveda_permanente(self._uid, boveda["id"])
+                    bloquear_boveda_permanente(self._db_path, boveda["id"])
                 except Exception:
                     pass
                 boveda["boveda_inaccesible"] = True
@@ -768,9 +764,9 @@ class BovedaScreen:
                 )
                 return
 
-            # Respuesta correcta → resetear bloqueo y abrir
+            # Respuesta correcta → resetear y abrir
             try:
-                resetear_bloqueo_boveda(self._uid, boveda["id"])
+                resetear_bloqueo_boveda(self._db_path, boveda["id"])
             except Exception:
                 pass
             boveda["intentos_password"] = 0
@@ -790,15 +786,15 @@ class BovedaScreen:
 
         f_resp._entry.bind("<Return>", lambda _: verificar())
         f_resp._entry.focus_set()
-
         top.wait_visibility()
         top.grab_set()
 
     def _desbloquear_boveda(self, boveda: dict, password: str) -> None:
-        """Deriva la clave Fernet y activa la bóveda en el panel derecho."""
-        self._fernet           = get_fernet_boveda(password, self._uid)
-        self._boveda_sel       = boveda
-        self._form_modo        = None
+        """Deriva la clave Fernet usando el salt exclusivo de la bóveda."""
+        salt_bytes         = bytes.fromhex(boveda.get("salt", ""))
+        self._fernet       = get_fernet_local(password, salt_bytes)
+        self._boveda_sel   = boveda
+        self._form_modo    = None
         self._entrada_editando = None
         self._lbl_boveda.config(
             text=f"⬡  {boveda.get('nombre', '')}",
@@ -815,7 +811,7 @@ class BovedaScreen:
         if not self._boveda_sel:
             return
         try:
-            self._entradas = cargar_entradas(self._uid, self._boveda_sel["id"])
+            self._entradas = cargar_entradas(self._db_path, self._boveda_sel["id"])
         except Exception as exc:
             messagebox.showerror("NébulaVault",
                                  f"Error al cargar entradas:\n{exc}",
@@ -824,7 +820,6 @@ class BovedaScreen:
         self._renderizar_panel_boveda()
 
     def _on_guardar_entrada(self, correo: str, password: str, nota: str) -> None:
-        """Cifra la contraseña y llama al servicio correspondiente."""
         if not self._boveda_sel:
             return
         try:
@@ -837,7 +832,7 @@ class BovedaScreen:
         try:
             if self._form_modo == "editar_entrada" and self._entrada_editando:
                 actualizado = actualizar_entrada(
-                    self._uid, bid,
+                    self._db_path, bid,
                     self._entrada_editando["id"],
                     correo, pw_cifrada, nota,
                 )
@@ -846,7 +841,9 @@ class BovedaScreen:
                         self._entradas[i].update(actualizado)
                         break
             else:
-                nueva = crear_entrada(self._uid, bid, correo, pw_cifrada, nota)
+                nueva = crear_entrada(
+                    self._db_path, bid, correo, pw_cifrada, nota
+                )
                 self._entradas.append(nueva)
                 self._conteos[bid] = self._conteos.get(bid, 0) + 1
                 self._renderizar_lista_bovedas()
@@ -869,7 +866,7 @@ class BovedaScreen:
             return
         bid = self._boveda_sel["id"]
         try:
-            eliminar_entrada(self._uid, bid, entrada["id"])
+            eliminar_entrada(self._db_path, bid, entrada["id"])
         except Exception as exc:
             messagebox.showerror("NébulaVault",
                                  f"Error al eliminar entrada:\n{exc}",
@@ -896,7 +893,7 @@ class BovedaScreen:
         self._renderizar_panel_boveda()
 
     # ══════════════════════════════════════════════════════════════════════
-    #  RENDERIZADO — LISTA DE BÓVEDAS (izquierda)
+    #  RENDERIZADO — LISTA DE BÓVEDAS
     # ══════════════════════════════════════════════════════════════════════
 
     def _renderizar_lista_bovedas(self) -> None:
@@ -920,15 +917,9 @@ class BovedaScreen:
                            self._boveda_sel["id"] == boveda["id"])
 
         if inaccesible:
-            bg    = BG_PANEL
-            borde = LOCK_RED
-            fg    = LOCK_RED
-            icono = "⛔"
+            bg = BG_PANEL; borde = LOCK_RED;   fg = LOCK_RED;   icono = "⛔"
         elif bloqueada:
-            bg    = BG_PANEL
-            borde = ACCENT_GOLD
-            fg    = ACCENT_GOLD
-            icono = "🔒"
+            bg = BG_PANEL; borde = ACCENT_GOLD; fg = ACCENT_GOLD; icono = "🔒"
         else:
             bg    = BG_CARD    if es_sel else BG_PANEL
             borde = ACCENT_CYAN if es_sel else BORDER_DARK
@@ -953,7 +944,8 @@ class BovedaScreen:
         lbl = tk.Label(row, text=f"{icono}  {boveda.get('nombre', '')}",
                        bg=bg, fg=fg, font=FONT_SUBTITLE, anchor="w")
         lbl.pack(side="left", fill="x", expand=True)
-        tk.Label(row, text=sub, bg=bg, fg=fg if (inaccesible or bloqueada) else TEXT_FAINT,
+        tk.Label(row, text=sub, bg=bg,
+                 fg=fg if (inaccesible or bloqueada) else TEXT_FAINT,
                  font=FONT_FAINT).pack(side="right")
 
         def click(b=boveda):
@@ -964,7 +956,7 @@ class BovedaScreen:
             widget.bind("<Button-1>", lambda _e, b=boveda: click(b))
 
     # ══════════════════════════════════════════════════════════════════════
-    #  RENDERIZADO — PANEL DERECHO (entradas + formulario)
+    #  RENDERIZADO — PANEL DERECHO
     # ══════════════════════════════════════════════════════════════════════
 
     def _renderizar_panel_boveda(self) -> None:
@@ -975,7 +967,6 @@ class BovedaScreen:
             self._mostrar_placeholder()
             return
 
-        # Canvas scrollable que envuelve todo el contenido derecho
         cv = tk.Canvas(self._content, bg=BG_PANEL, highlightthickness=0)
         sb = tk.Scrollbar(self._content, orient="vertical", command=cv.yview,
                           bg=BG_PANEL, troughcolor=BG_PANEL)
@@ -1000,13 +991,11 @@ class BovedaScreen:
 
         tk.Frame(inner, bg=BORDER_DARK, height=1).pack(fill="x", padx=12)
 
-        # Formulario inline (al tope, si está activo)
         if self._form_modo in ("nueva_entrada", "editar_entrada"):
             self._construir_form_entrada(inner)
             tk.Frame(inner, bg=BORDER_DARK, height=1).pack(
                 fill="x", padx=12, pady=(0, 4))
 
-        # Lista de entradas
         if not self._entradas:
             tk.Label(inner,
                      text="Esta bóveda está vacía. Agrega tu primera entrada.",
@@ -1024,7 +1013,6 @@ class BovedaScreen:
         row = tk.Frame(card, bg=BG_CARD)
         row.pack(fill="x", padx=10, pady=8)
 
-        # Columna izquierda: datos
         info = tk.Frame(row, bg=BG_CARD)
         info.pack(side="left", fill="x", expand=True)
 
@@ -1032,7 +1020,7 @@ class BovedaScreen:
                  bg=BG_CARD, fg=ACCENT_CYAN, font=FONT_SUBTITLE,
                  anchor="w").pack(anchor="w")
 
-        # Contraseña con toggle ver / ocultar
+        # Contraseña con toggle
         pw_var     = tk.StringVar(value="••••••••")
         pw_visible = [False]
         pw_row     = tk.Frame(info, bg=BG_CARD)
@@ -1067,7 +1055,6 @@ class BovedaScreen:
                      wraplength=480, justify="left"
                      ).pack(anchor="w", pady=(3, 0))
 
-        # Columna derecha: acciones contextuales
         acc = tk.Frame(row, bg=BG_CARD)
         acc.pack(side="right", padx=(10, 0))
         _SmallBtn(acc, "[ editar ]",   ACCENT_CYAN,
@@ -1076,7 +1063,7 @@ class BovedaScreen:
                   lambda e=entrada: self._on_eliminar_entrada(e)).pack(side="left", padx=2)
 
     # ══════════════════════════════════════════════════════════════════════
-    #  FORMULARIO INLINE — crear / editar entrada
+    #  FORMULARIO INLINE
     # ══════════════════════════════════════════════════════════════════════
 
     def _construir_form_entrada(self, parent: tk.Frame) -> None:
@@ -1110,7 +1097,6 @@ class BovedaScreen:
         inner.columnconfigure(0, weight=1)
         inner.columnconfigure(1, weight=1)
 
-        # Pre-cargar valores al editar
         if es_edicion and self._entrada_editando:
             e = self._entrada_editando
             f_correo.set(e.get("correo", ""))
@@ -1144,31 +1130,18 @@ class BovedaScreen:
         f_correo._entry.focus_set()
 
     # ══════════════════════════════════════════════════════════════════════
-    #  PERFIL Y CIERRE DE SESIÓN
+    #  SALIR
     # ══════════════════════════════════════════════════════════════════════
 
-    def _abrir_perfil(self) -> None:
-        """Oculta la bóveda, abre el perfil; al volver se restaura la bóveda."""
-        self._root.withdraw()
-        ProfileScreen(
-            parent       = self._root,
-            datos_usuario= self._datos,
-            on_logout    = self._cerrar_sesion,
-            on_volver    = self._root.deiconify,
-        )
-
-    def _cerrar_sesion(self) -> None:
-        """
-        Destruye la ventana de bóvedas y abre la pantalla de login.
-        Sigue el mismo patrón que PantallaCloud._abrir_app_principal.
-        """
+    def _salir(self) -> None:
+        """Cierra la pantalla de bóvedas y regresa al WelcomeScreen."""
         if self._inactivity_id:
             self._root.after_cancel(self._inactivity_id)
         self._root.destroy()
         import tkinter as _tk
-        from views.cloud import PantallaCloud
+        from views.WelcomeScreen import WelcomeScreen
         nuevo_root = _tk.Tk()
-        PantallaCloud(nuevo_root)
+        WelcomeScreen(nuevo_root)
         nuevo_root.mainloop()
 
     # ══════════════════════════════════════════════════════════════════════
@@ -1192,5 +1165,12 @@ class BovedaScreen:
         )
 
     def _on_inactividad(self) -> None:
-        """Cierra sesión automáticamente tras el período de inactividad."""
-        self._cerrar_sesion()
+        """Regresa al selector de directorio tras el período de inactividad."""
+        if self._inactivity_id:
+            self._root.after_cancel(self._inactivity_id)
+        self._root.destroy()
+        import tkinter as _tk
+        from views.onPremisesPath import OnPremisesPath
+        nuevo_root = _tk.Tk()
+        OnPremisesPath(nuevo_root)
+        nuevo_root.mainloop()
