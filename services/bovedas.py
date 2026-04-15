@@ -6,14 +6,17 @@ NébulaVault — Lógica de negocio y acceso a Firestore para Bóvedas.
 Ruta Firestore:  users/{uid}/bovedas/{boveda_id}
 
 Campos de una bóveda:
-    nombre          str       — nombre legible dado por el usuario
-    password_hash   str       — hash bcrypt de la contraseña de la bóveda
-                                (usada como seed de la clave de cifrado)
-    creado_en       Timestamp — fecha de creación (SERVER_TIMESTAMP)
+    nombre                       str       — nombre legible dado por el usuario
+    password_hash                str       — hash bcrypt de la contraseña
+    pregunta_seguridad           str       — pregunta de seguridad elegida
+    password_cifrada_con_respuesta str     — contraseña cifrada con la respuesta
+                                             (permite recuperar acceso tras bloqueo)
+    intentos_password            int       — intentos fallidos acumulados
+    boveda_bloqueada             bool      — True tras 3 intentos fallidos
+    boveda_inaccesible           bool      — True si la respuesta fue incorrecta
+    creado_en                    Timestamp — fecha de creación
 
-NOTA: la contraseña en texto plano NUNCA se almacena. Solo el hash bcrypt,
-que sirve para verificar que el usuario conoce la contraseña antes de
-derivar la clave Fernet y desbloquear las entradas.
+NOTA: la contraseña en texto plano NUNCA se almacena directamente.
 ════════════════════════════════════════════════════════════════════════════
 """
 
@@ -49,21 +52,29 @@ def cargar_bovedas(uid: str) -> list[dict]:
     return [{"id": d.id, **d.to_dict()} for d in docs]
 
 
-def crear_boveda(uid: str, nombre: str, password_hash: str) -> dict:
+def crear_boveda(
+    uid: str,
+    nombre: str,
+    password_hash: str,
+    pregunta_seguridad: str,
+    password_cifrada_con_respuesta: str,
+) -> dict:
     """
     Crea una nueva bóveda en Firestore.
 
     Parámetros:
-        uid           — UID del usuario autenticado.
-        nombre        — Nombre de la bóveda (no vacío).
-        password_hash — Hash bcrypt de la contraseña de la bóveda,
-                        generado con services.crypto.hashear_password_boveda.
+        uid                          — UID del usuario autenticado.
+        nombre                       — Nombre de la bóveda (no vacío).
+        password_hash                — Hash bcrypt de la contraseña.
+        pregunta_seguridad           — Pregunta de seguridad seleccionada.
+        password_cifrada_con_respuesta — Contraseña cifrada con la respuesta
+                                         de seguridad (para recuperación).
 
     Retorna:
-        dict con 'id', 'nombre' y 'password_hash'.
+        dict con todos los campos iniciales de la bóveda.
 
     Lanza:
-        ValueError  si nombre o password_hash están vacíos.
+        ValueError  si algún campo obligatorio está vacío.
         Exception   propagada desde Firebase si la escritura falla.
     """
     nombre = nombre.strip()
@@ -71,15 +82,59 @@ def crear_boveda(uid: str, nombre: str, password_hash: str) -> dict:
         raise ValueError("El nombre de la bóveda no puede estar vacío.")
     if not password_hash:
         raise ValueError("Se requiere el hash de la contraseña.")
+    if not pregunta_seguridad or not password_cifrada_con_respuesta:
+        raise ValueError("La pregunta de seguridad y su respuesta son obligatorias.")
 
     datos = {
-        "nombre":        nombre,
-        "password_hash": password_hash,
-        "creado_en":     firestore.SERVER_TIMESTAMP,
+        "nombre":                        nombre,
+        "password_hash":                 password_hash,
+        "pregunta_seguridad":            pregunta_seguridad,
+        "password_cifrada_con_respuesta": password_cifrada_con_respuesta,
+        "intentos_password":             0,
+        "boveda_bloqueada":              False,
+        "boveda_inaccesible":            False,
+        "creado_en":                     firestore.SERVER_TIMESTAMP,
     }
     ref = _col_bovedas(uid).document()
     ref.set(datos)
-    return {"id": ref.id, "nombre": nombre, "password_hash": password_hash}
+    return {"id": ref.id, **datos}
+
+
+def actualizar_intentos_boveda(
+    uid: str,
+    boveda_id: str,
+    intentos: int,
+    bloqueada: bool = False,
+) -> None:
+    """
+    Actualiza el contador de intentos fallidos y el estado de bloqueo temporal.
+    Llamar con intentos=0, bloqueada=False para resetear tras login correcto.
+    """
+    _col_bovedas(uid).document(boveda_id).update({
+        "intentos_password": intentos,
+        "boveda_bloqueada":  bloqueada,
+    })
+
+
+def bloquear_boveda_permanente(uid: str, boveda_id: str) -> None:
+    """
+    Marca la bóveda como permanentemente inaccesible tras respuesta
+    de seguridad incorrecta.
+    """
+    _col_bovedas(uid).document(boveda_id).update({
+        "boveda_inaccesible": True,
+    })
+
+
+def resetear_bloqueo_boveda(uid: str, boveda_id: str) -> None:
+    """
+    Restablece contadores y desbloquea la bóveda tras respuesta
+    de seguridad correcta.
+    """
+    _col_bovedas(uid).document(boveda_id).update({
+        "intentos_password": 0,
+        "boveda_bloqueada":  False,
+    })
 
 
 def eliminar_boveda(uid: str, boveda_id: str) -> None:

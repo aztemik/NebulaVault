@@ -20,7 +20,7 @@ from tkinter import ttk, messagebox
 import requests
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
-from .firebaseLogic import AuthFire
+from .firebaseLogic import AuthFire, VerificacionRequeridaError
 
 from .legalTexts import WelcomeScreen
 
@@ -208,6 +208,7 @@ class NVButton(tk.Canvas):
         super().__init__(parent, width=ancho, height=alto,
                          bg=BG_VOID, highlightthickness=0, cursor="hand2", **kw)
         self._texto, self._acento, self._cmd = texto, acento, comando
+        self._original = texto   # para restaurar tras set_loading(False)
         self._ancho, self._alto, self._hover = ancho, alto, False
         self._render()
         self.bind("<Enter>",    lambda _: self._set_hover(True))
@@ -232,8 +233,8 @@ class NVButton(tk.Canvas):
         self._render()
 
     def set_loading(self, estado: bool) -> None:
-        """Cambia el texto a '…' durante operaciones async."""
-        self._texto = "PROCESANDO…" if estado else self._texto
+        """Cambia el texto a 'PROCESANDO…' durante operaciones y lo restaura al terminar."""
+        self._texto = "PROCESANDO…" if estado else self._original
         self._render()
 
 
@@ -260,13 +261,15 @@ class PantallaCloud:
     """
 
     ANCHO = 560
-    ALTO_LOGIN  = 500
-    ALTO_TOTAL  = 850   # con el panel de registro visible
+    ALTO_LOGIN  = 598   # espacio para label de estado + dos enlaces de verificación
+    ALTO_TOTAL  = 948   # con el panel de registro visible
 
     def __init__(self, root: tk.Tk) -> None:
         self.root          = root
         self._modo         = "login"   # "login" | "registro"
-        self._id_token_sesion: str | None = None   # token tras login exitoso
+        self._id_token_sesion:       str | None = None
+        self._id_token_verificacion: str | None = None
+        self._uid_verificacion:      str | None = None
 
         self._configurar_ventana()
         self._construir()
@@ -343,12 +346,30 @@ class PantallaCloud:
         self._f_pass.place(x=px, y=188)
         self._f_pass.bind_enter(self._hacer_login)
 
-        # Mensaje de estado (error / éxito)
+        # Mensaje de estado (error / éxito) — altura fija para no empujar el botón
         self._lbl_status = tk.Label(
             self.root, text="", bg=BG_VOID,
             font=FONT_LABEL, fg=LOCK_RED, wraplength=340, justify="center"
         )
-        self._lbl_status.place(x=px, y=260, width=340)
+        self._lbl_status.place(x=px, y=260, width=340, height=78)
+
+        # ── Enlaces de verificación (ocultos por defecto) ────────────────
+        self._id_token_verificacion = None
+        self._uid_verificacion:  str | None = None
+
+        self._lbl_reenviar = tk.Label(
+            self.root, text="", bg=BG_VOID, fg=ACCENT_GOLD,
+            font=FONT_LINK, cursor="hand2",
+        )
+        self._lbl_reenviar.place(x=px, y=340, width=340, height=18)
+        self._lbl_reenviar.bind("<Button-1>", lambda _: self._reenviar_verificacion())
+
+        self._lbl_comprobar = tk.Label(
+            self.root, text="", bg=BG_VOID, fg=ACCENT_CYAN,
+            font=FONT_LINK, cursor="hand2",
+        )
+        self._lbl_comprobar.place(x=px, y=360, width=340, height=18)
+        self._lbl_comprobar.bind("<Button-1>", lambda _: self._comprobar_verificacion())
 
         # Botón LOGIN
         self._btn_login = NVButton(
@@ -356,12 +377,12 @@ class PantallaCloud:
             acento=ACCENT_CYAN, comando=self._hacer_login,
             ancho=340, alto=42
         )
-        self._btn_login.place(x=px, y=288)
+        self._btn_login.place(x=px, y=382)
 
         # ── Separador + sección Registro ─────────────────────────────────
-        _sep(self._bg, cw//2, 356, mitad=230, color=BORDER_DARK)
+        _sep(self._bg, cw//2, 452, mitad=230, color=BORDER_DARK)
 
-        self._bg.create_text(cw//2, 374,
+        self._bg.create_text(cw//2, 470,
                              text="¿No tienes cuenta?",
                              fill=TEXT_MUTED, font=FONT_LABEL, anchor="center")
 
@@ -379,7 +400,7 @@ class PantallaCloud:
             font=FONT_LINK,
             cursor="hand2",
         )
-        self._btn_toggle.place(x=cw//2 - 75, y=392)
+        self._btn_toggle.place(x=cw//2 - 75, y=488)
         self._btn_toggle.bind("<Button-1>", lambda _: self._toggle_registro())
         self._btn_toggle.bind("<Enter>",
                               lambda _: self._btn_toggle.config(fg=ACCENT_CYAN))
@@ -388,7 +409,7 @@ class PantallaCloud:
 
         # ── Panel de REGISTRO (sólo si modo == "registro") ────────────────
         if self._modo == "registro":
-            self._construir_panel_registro(px, y_inicio=430)
+            self._construir_panel_registro(px, y_inicio=528)
 
         # ── Footer ────────────────────────────────────────────────────────
         self._bg.create_text(cw//2, alto - 26,
@@ -479,6 +500,11 @@ class PantallaCloud:
             self._set_status("La contraseña debe tener al menos 6 caracteres.")
             return
 
+        # Limpiar estado de verificación previo
+        self._lbl_reenviar.config(text="")
+        self._lbl_comprobar.config(text="")
+        self._id_token_verificacion = None
+        self._uid_verificacion      = None
         self._set_status("")
         self._btn_login.set_loading(True)
         self.root.update_idletasks()
@@ -487,8 +513,20 @@ class PantallaCloud:
             datos = AuthFire.login_con_email(email, password)
             self._id_token_sesion = datos.get("idToken")
             self._set_status("✔  Acceso concedido.", color=SUCCESS)
-            # Pequeña pausa visual antes de navegar
             self.root.after(700, lambda: self.on_login_exitoso(datos))
+
+        except VerificacionRequeridaError as exc:
+            self._id_token_verificacion = exc.id_token
+            self._uid_verificacion      = exc.uid
+            self._set_status(
+                "✉  Correo no verificado.\n"
+                "Haz clic en el enlace que te enviamos y luego\n"
+                "pulsa «Ya lo verifiqué» para continuar.",
+                color=ACCENT_GOLD,
+            )
+            self._lbl_reenviar.config(text="↺  Reenviar correo de verificación")
+            self._lbl_comprobar.config(text="✔  Ya lo verifiqué — comprobar ahora")
+            self._f_pass.limpiar()
 
         except RuntimeError as exc:
             self._set_status(str(exc))
@@ -498,6 +536,54 @@ class PantallaCloud:
             self._set_status(f"Error inesperado: {exc}")
         finally:
             self._btn_login.set_loading(False)
+
+    def _reenviar_verificacion(self) -> None:
+        """Reenvía el correo de verificación usando el idToken almacenado."""
+        if not self._id_token_verificacion:
+            return
+        try:
+            AuthFire.enviar_correo_verificacion(self._id_token_verificacion)
+            self._set_status(
+                "✔  Correo reenviado. Haz clic en el enlace y luego\n"
+                "pulsa «Ya lo verifiqué» para continuar.",
+                color=SUCCESS,
+            )
+        except Exception as exc:
+            self._set_status(f"No se pudo reenviar el correo: {exc}")
+
+    def _comprobar_verificacion(self) -> None:
+        """
+        Consulta Firebase Auth para saber si el correo ya fue verificado.
+        Si es así, actualiza Firestore y muestra mensaje de éxito.
+        El usuario solo tiene que ingresar su contraseña y hacer login.
+        """
+        if not self._id_token_verificacion or not self._uid_verificacion:
+            return
+        try:
+            verificado = AuthFire.comprobar_verificacion_email(
+                self._id_token_verificacion,
+                self._uid_verificacion,
+            )
+            if verificado:
+                self._lbl_reenviar.config(text="")
+                self._lbl_comprobar.config(text="")
+                self._id_token_verificacion = None
+                self._uid_verificacion      = None
+                self._set_status(
+                    "✔  ¡Correo verificado!\n"
+                    "Ingresa tu contraseña y pulsa Iniciar Sesión.",
+                    color=SUCCESS,
+                )
+            else:
+                self._set_status(
+                    "✉  Aún no verificado.\n"
+                    "Haz clic en el enlace del correo y vuelve a intentarlo.",
+                    color=ACCENT_GOLD,
+                )
+        except requests.exceptions.ConnectionError:
+            self._set_status("Sin conexión a internet. Verifica tu red.")
+        except Exception as exc:
+            self._set_status(f"Error al comprobar: {exc}")
 
     def _hacer_registro(self) -> None:
         nombre   = self._r_nombre.get().strip()
@@ -519,20 +605,21 @@ class PantallaCloud:
         self.root.update_idletasks()
 
         try:
-            datos = AuthFire.registrar_usuario(nombre, email, password)
+            AuthFire.registrar_usuario(nombre, email, password)
 
-            # Obtener idToken para enviar verificación (login inmediato post-registro)
-            datos_login = AuthFire.login_con_email(email, password)
-            id_token    = datos_login.get("idToken")
-
-            # Enviar correo de verificación (función stub lista para implementar)
-            AuthFire.enviar_correo_verificacion(id_token)
+            # login_con_email lanzará VerificacionRequeridaError porque el correo
+            # aún no está verificado (se acaba de crear la cuenta). Ese error trae
+            # el idToken que necesitamos para enviar el correo de verificación.
+            try:
+                AuthFire.login_con_email(email, password)
+            except VerificacionRequeridaError as exc_ver:
+                AuthFire.enviar_correo_verificacion(exc_ver.id_token)
 
             self._set_status(
                 "✔  Cuenta creada. Revisa tu correo para verificarla.",
-                color=SUCCESS, registro=True
+                color=SUCCESS, registro=True,
             )
-            # Volver al modo login tras breve pausa
+            # Volver al login con el correo prellenado — igual que antes
             self.root.after(4000, lambda: self._volver_a_login(email))
 
         except RuntimeError as exc:

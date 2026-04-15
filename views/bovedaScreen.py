@@ -33,11 +33,17 @@ from cryptography.fernet import Fernet
 from services.crypto   import (cifrar, descifrar,
                                 get_fernet_boveda,
                                 hashear_password_boveda,
-                                verificar_password_boveda)
-from services.bovedas  import cargar_bovedas, crear_boveda, eliminar_boveda
+                                verificar_password_boveda,
+                                cifrar_password_con_respuesta,
+                                descifrar_password_con_respuesta)
+from services.bovedas  import (cargar_bovedas, crear_boveda, eliminar_boveda,
+                                actualizar_intentos_boveda,
+                                bloquear_boveda_permanente,
+                                resetear_bloqueo_boveda)
 from services.entradas import (cargar_entradas, crear_entrada,
                                 actualizar_entrada, eliminar_entrada,
                                 contar_entradas)
+from views.profileScreen import ProfileScreen
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  PALETA NÉBULAVAULT
@@ -147,6 +153,19 @@ class NVEntry(tk.Frame):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  PREGUNTAS DE SEGURIDAD PREDEFINIDAS
+# ═══════════════════════════════════════════════════════════════════════════
+
+PREGUNTAS_SEGURIDAD = [
+    "¿Cuál es tu materia favorita de la universidad?",
+    "¿Cuál es el nombre de tu primera mascota?",
+    "¿En qué ciudad naciste?",
+    "¿Cuál es el nombre de tu escuela primaria?",
+    "¿Cuál es tu película favorita de la infancia?",
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  PANTALLA DE BÓVEDAS
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -213,6 +232,15 @@ class BovedaScreen:
         hdr.pack(fill="x", padx=10, pady=(10, 6))
         tk.Label(hdr, text="◈  MIS BÓVEDAS", bg=BG_PANEL,
                  fg=ACCENT_CYAN, font=FONT_TITLE).pack(side="left")
+
+        lbl_perfil = tk.Label(
+            hdr, text="👤 Mi perfil",
+            bg=BG_PANEL, fg=TEXT_MUTED, font=FONT_FAINT, cursor="hand2",
+        )
+        lbl_perfil.pack(side="right")
+        lbl_perfil.bind("<Button-1>", lambda _: self._abrir_perfil())
+        lbl_perfil.bind("<Enter>", lambda _: lbl_perfil.config(fg=ACCENT_CYAN))
+        lbl_perfil.bind("<Leave>", lambda _: lbl_perfil.config(fg=TEXT_MUTED))
 
         tk.Frame(self._left, bg=BORDER_DARK, height=1).pack(fill="x", padx=10)
 
@@ -360,55 +388,97 @@ class BovedaScreen:
 
     def _dialogo_nueva_boveda(self) -> None:
         """
-        Toplevel con campos de nombre y contraseña para crear una nueva bóveda.
+        Toplevel con campos de nombre, contraseña y pregunta de seguridad
+        para crear una nueva bóveda.
 
-        La contraseña actúa como seed de la derivación de clave (PBKDF2):
-        las entradas de esta bóveda solo se pueden descifrar conociendo
-        esta contraseña.
+        La contraseña es la clave de cifrado (PBKDF2 → Fernet).
+        La respuesta cifra una copia de esa contraseña para recuperación
+        ante bloqueo por intentos fallidos.
         """
         top = tk.Toplevel(self._root)
         top.title("Nueva bóveda")
         top.configure(bg=BG_PANEL)
         top.resizable(False, False)
-        w, h = 440, 360
+        w, h = 460, 610
         sw, sh = self._root.winfo_screenwidth(), self._root.winfo_screenheight()
         top.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
 
-        frm = tk.Frame(top, bg=BG_PANEL, padx=24, pady=20)
+        frm = tk.Frame(top, bg=BG_PANEL, padx=24, pady=18)
         frm.pack(fill="both", expand=True)
 
-        # Título
+        # ── Título ────────────────────────────────────────────────────────
         tk.Label(frm, text="⬡  NUEVA BÓVEDA", bg=BG_PANEL,
-                 fg=ACCENT_CYAN, font=FONT_TITLE).pack(anchor="w", pady=(0, 4))
-        tk.Label(frm,
-                 text="La contraseña es la clave de cifrado de esta bóveda.\n"
-                      "No hay forma de recuperarla si la olvidas.",
-                 bg=BG_PANEL, fg=TEXT_MUTED, font=FONT_FAINT,
-                 justify="left").pack(anchor="w", pady=(0, 12))
+                 fg=ACCENT_CYAN, font=FONT_TITLE).pack(anchor="w", pady=(0, 10))
 
-        # Separador
-        tk.Frame(frm, bg=BORDER_DARK, height=1).pack(fill="x", pady=(0, 12))
+        # ── Advertencia ───────────────────────────────────────────────────
+        warn = tk.Frame(frm, bg="#140d00",
+                        highlightthickness=1, highlightbackground=ACCENT_GOLD)
+        warn.pack(fill="x", pady=(0, 12))
+        tk.Label(warn, text="⚠  ADVERTENCIA",
+                 bg="#140d00", fg=ACCENT_GOLD, font=FONT_SUBTITLE,
+                 anchor="w").pack(anchor="w", padx=10, pady=(8, 2))
+        tk.Label(warn,
+                 text="Si olvidas la contraseña de esta bóveda Y la respuesta a la\n"
+                      "pregunta de seguridad, el contenido será PERMANENTEMENTE\n"
+                      "INACCESIBLE. NébulaVault no puede recuperarlo.",
+                 bg="#140d00", fg=TEXT_MUTED, font=FONT_FAINT,
+                 justify="left").pack(anchor="w", padx=10, pady=(0, 8))
 
-        # Campos
+        # ── Separador ─────────────────────────────────────────────────────
+        tk.Frame(frm, bg=BORDER_DARK, height=1).pack(fill="x", pady=(0, 10))
+
+        # ── Campos de contraseña ──────────────────────────────────────────
         f_nombre = NVEntry(frm, label="NOMBRE DE LA BÓVEDA",
-                           acento=ACCENT_CYAN, ancho_px=380)
+                           acento=ACCENT_CYAN, ancho_px=400)
         f_nombre.pack(fill="x", pady=(0, 8))
 
         f_pass = NVEntry(frm, label="CONTRASEÑA DE LA BÓVEDA", show="•",
-                         acento=ACCENT_CYAN, ancho_px=380)
+                         acento=ACCENT_CYAN, ancho_px=400)
         f_pass.pack(fill="x", pady=(0, 8))
 
         f_confirm = NVEntry(frm, label="CONFIRMAR CONTRASEÑA", show="•",
-                            acento=ACCENT_CYAN, ancho_px=380)
+                            acento=ACCENT_CYAN, ancho_px=400)
         f_confirm.pack(fill="x")
 
-        lbl_err = tk.Label(frm, text="", bg=BG_PANEL, fg=LOCK_RED, font=FONT_FAINT)
-        lbl_err.pack(pady=(6, 0))
+        # ── Separador ─────────────────────────────────────────────────────
+        tk.Frame(frm, bg=BORDER_DARK, height=1).pack(fill="x", pady=(12, 8))
 
+        # ── Pregunta de seguridad ─────────────────────────────────────────
+        tk.Label(frm, text="PREGUNTA DE SEGURIDAD", bg=BG_PANEL,
+                 fg=ACCENT_GOLD, font=FONT_SUBTITLE,
+                 anchor="w").pack(anchor="w", pady=(0, 6))
+
+        pregunta_var = tk.StringVar(value=PREGUNTAS_SEGURIDAD[0])
+        opt = tk.OptionMenu(frm, pregunta_var, *PREGUNTAS_SEGURIDAD)
+        opt.config(
+            bg=BG_CARD, fg=TEXT_MAIN, activebackground=CYAN_20,
+            activeforeground=TEXT_MAIN, font=FONT_FAINT,
+            relief="flat", highlightthickness=1,
+            highlightbackground=BORDER_DARK, bd=0, width=50,
+        )
+        opt["menu"].config(
+            bg=BG_CARD, fg=TEXT_MAIN,
+            activebackground=ACCENT_GOLD, activeforeground=BG_VOID,
+            font=FONT_FAINT,
+        )
+        opt.pack(anchor="w", pady=(0, 8))
+
+        f_respuesta = NVEntry(frm, label="TU RESPUESTA", show="•",
+                              acento=ACCENT_GOLD, ancho_px=400)
+        f_respuesta.pack(fill="x")
+
+        # ── Error / estado ────────────────────────────────────────────────
+        lbl_err = tk.Label(frm, text="", bg=BG_PANEL, fg=LOCK_RED,
+                           font=FONT_FAINT, wraplength=400, justify="left")
+        lbl_err.pack(pady=(6, 0), anchor="w")
+
+        # ── Botón ─────────────────────────────────────────────────────────
         def confirmar():
-            nombre  = f_nombre.get().strip()
-            pw      = f_pass.get()
-            pw_conf = f_confirm.get()
+            nombre    = f_nombre.get().strip()
+            pw        = f_pass.get()
+            pw_conf   = f_confirm.get()
+            pregunta  = pregunta_var.get()
+            respuesta = f_respuesta.get().strip()
 
             if not nombre:
                 lbl_err.config(text="El nombre no puede estar vacío.")
@@ -419,25 +489,36 @@ class BovedaScreen:
             if pw != pw_conf:
                 lbl_err.config(text="Las contraseñas no coinciden.")
                 return
+            if len(respuesta) < 2:
+                lbl_err.config(text="La respuesta de seguridad es muy corta.")
+                return
 
             top.destroy()
-            self._on_crear_boveda(nombre, pw)
+            self._on_crear_boveda(nombre, pw, pregunta, respuesta)
 
         NVButton(frm, texto="✔  CREAR BÓVEDA",
                  acento=ACCENT_CYAN, comando=confirmar,
-                 ancho=200, alto=34).pack(pady=(10, 0))
+                 ancho=200, alto=34).pack(pady=(8, 0))
 
-        f_confirm._entry.bind("<Return>", lambda _: confirmar())
+        f_respuesta._entry.bind("<Return>", lambda _: confirmar())
         f_nombre._entry.focus_set()
 
-        # grab_set DESPUÉS de que la ventana sea visible
         top.wait_visibility()
         top.grab_set()
 
-    def _on_crear_boveda(self, nombre: str, password: str) -> None:
+    def _on_crear_boveda(
+        self, nombre: str, password: str,
+        pregunta: str, respuesta: str,
+    ) -> None:
         try:
-            pw_hash = hashear_password_boveda(password)
-            nueva   = crear_boveda(self._uid, nombre, pw_hash)
+            pw_hash          = hashear_password_boveda(password)
+            pw_cifrada_resp  = cifrar_password_con_respuesta(
+                password, respuesta, self._uid
+            )
+            nueva = crear_boveda(
+                self._uid, nombre, pw_hash,
+                pregunta, pw_cifrada_resp,
+            )
         except Exception as exc:
             messagebox.showerror("NébulaVault",
                                  f"Error al crear bóveda:\n{exc}",
@@ -477,19 +558,34 @@ class BovedaScreen:
         self._mostrar_placeholder()
 
     def _seleccionar_boveda(self, boveda: dict) -> None:
-        """Al hacer clic en una bóveda pide la contraseña para desbloquearla."""
+        """Al hacer clic en una bóveda evalúa su estado y actúa en consecuencia."""
+        if boveda.get("boveda_inaccesible", False):
+            messagebox.showerror(
+                "Bóveda inaccesible",
+                f"«{boveda.get('nombre', '')}» fue bloqueada permanentemente.\n\n"
+                "Esta bóveda no puede abrirse ni recuperarse.",
+                parent=self._root,
+            )
+            return
+        if boveda.get("boveda_bloqueada", False):
+            self._dialogo_pregunta_seguridad(boveda)
+            return
         self._dialogo_desbloquear(boveda)
 
     def _dialogo_desbloquear(self, boveda: dict) -> None:
         """
         Toplevel que solicita la contraseña de la bóveda.
-        Solo si es correcta deriva la clave Fernet y abre las entradas.
+
+        Política de bloqueo (acumulada en Firestore):
+          · 1er intento fallido  → mensaje de error
+          · 2° intento fallido   → advertencia de último intento
+          · 3er intento fallido  → bóveda bloqueada → diálogo de pregunta
         """
         top = tk.Toplevel(self._root)
         top.title(f"Desbloquear — {boveda.get('nombre', '')}")
         top.configure(bg=BG_PANEL)
         top.resizable(False, False)
-        w, h = 400, 240
+        w, h = 400, 280
         sw, sh = self._root.winfo_screenwidth(), self._root.winfo_screenheight()
         top.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
 
@@ -499,8 +595,8 @@ class BovedaScreen:
         tk.Label(frm, text="⬡  DESBLOQUEAR BÓVEDA", bg=BG_PANEL,
                  fg=ACCENT_CYAN, font=FONT_TITLE).pack(anchor="w", pady=(0, 4))
         tk.Label(frm, text=f"«{boveda.get('nombre', '')}»",
-                 bg=BG_PANEL, fg=TEXT_MUTED, font=FONT_SUBTITLE).pack(anchor="w",
-                                                                        pady=(0, 12))
+                 bg=BG_PANEL, fg=TEXT_MUTED, font=FONT_SUBTITLE).pack(
+                     anchor="w", pady=(0, 10))
 
         tk.Frame(frm, bg=BORDER_DARK, height=1).pack(fill="x", pady=(0, 12))
 
@@ -508,26 +604,75 @@ class BovedaScreen:
                          acento=ACCENT_CYAN, ancho_px=340)
         f_pass.pack(fill="x")
 
-        lbl_err = tk.Label(frm, text="", bg=BG_PANEL, fg=LOCK_RED, font=FONT_FAINT)
-        lbl_err.pack(pady=(6, 0))
+        lbl_status = tk.Label(frm, text="", bg=BG_PANEL, fg=LOCK_RED,
+                              font=FONT_FAINT, wraplength=340, justify="left")
+        lbl_status.pack(pady=(6, 0), anchor="w")
 
-        intentos = [0]
+        # Advertencia previa si ya hay 2 intentos fallidos acumulados
+        intentos_act = boveda.get("intentos_password", 0)
+        if intentos_act == 2:
+            lbl_status.config(
+                text="⚠  Último intento disponible. Un fallo más bloqueará esta bóveda.",
+                fg=ACCENT_GOLD,
+            )
 
         def intentar():
+            nonlocal intentos_act
             pw = f_pass.get()
             if not pw:
-                lbl_err.config(text="Ingresa la contraseña.")
+                lbl_status.config(text="Ingresa la contraseña.", fg=LOCK_RED)
                 return
 
-            hash_guardado = boveda.get("password_hash", "")
-            if not verificar_password_boveda(pw, hash_guardado):
-                intentos[0] += 1
+            if not verificar_password_boveda(pw, boveda.get("password_hash", "")):
+                intentos_act += 1
+                bloquear = intentos_act >= 3
+
+                # Persistir en Firestore (best-effort)
+                try:
+                    actualizar_intentos_boveda(
+                        self._uid, boveda["id"], intentos_act, bloquear
+                    )
+                except Exception:
+                    pass
+
+                # Actualizar objeto local y lista
+                boveda["intentos_password"] = intentos_act
+                if bloquear:
+                    boveda["boveda_bloqueada"] = True
+                for b in self._bovedas:
+                    if b["id"] == boveda["id"]:
+                        b["intentos_password"] = intentos_act
+                        if bloquear:
+                            b["boveda_bloqueada"] = True
+
+                if bloquear:
+                    top.destroy()
+                    self._renderizar_lista_bovedas()
+                    self._dialogo_pregunta_seguridad(boveda)
+                    return
+
                 f_pass.limpiar()
-                lbl_err.config(
-                    text=f"Contraseña incorrecta.  (intento {intentos[0]})"
-                )
                 f_pass._entry.focus_set()
+
+                if intentos_act == 1:
+                    lbl_status.config(text="Contraseña incorrecta.", fg=LOCK_RED)
+                else:   # intentos_act == 2
+                    lbl_status.config(
+                        text="⚠  Contraseña incorrecta.\n"
+                             "Último intento disponible. Un fallo más bloqueará esta bóveda.",
+                        fg=ACCENT_GOLD,
+                    )
                 return
+
+            # Contraseña correcta — resetear contador
+            try:
+                actualizar_intentos_boveda(self._uid, boveda["id"], 0, False)
+            except Exception:
+                pass
+            boveda["intentos_password"] = 0
+            for b in self._bovedas:
+                if b["id"] == boveda["id"]:
+                    b["intentos_password"] = 0
 
             top.destroy()
             self._desbloquear_boveda(boveda, pw)
@@ -539,7 +684,108 @@ class BovedaScreen:
         f_pass._entry.bind("<Return>", lambda _: intentar())
         f_pass._entry.focus_set()
 
-        # grab_set DESPUÉS de que la ventana sea visible
+        top.wait_visibility()
+        top.grab_set()
+
+    def _dialogo_pregunta_seguridad(self, boveda: dict) -> None:
+        """
+        Toplevel que muestra la pregunta de seguridad para desbloquear la bóveda
+        tras agotar los intentos de contraseña.
+
+        · Respuesta correcta → resetea bloqueo y abre la bóveda directamente.
+        · Respuesta incorrecta → bóveda bloqueada permanentemente.
+        """
+        top = tk.Toplevel(self._root)
+        top.title(f"Pregunta de seguridad — {boveda.get('nombre', '')}")
+        top.configure(bg=BG_PANEL)
+        top.resizable(False, False)
+        w, h = 460, 330
+        sw, sh = self._root.winfo_screenwidth(), self._root.winfo_screenheight()
+        top.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+
+        frm = tk.Frame(top, bg=BG_PANEL, padx=24, pady=20)
+        frm.pack(fill="both", expand=True)
+
+        tk.Label(frm, text="🔒  BÓVEDA BLOQUEADA", bg=BG_PANEL,
+                 fg=LOCK_RED, font=FONT_TITLE).pack(anchor="w", pady=(0, 4))
+        tk.Label(frm,
+                 text="Se agotaron los intentos de contraseña.\n"
+                      "Responde correctamente para acceder.\n"
+                      "Una respuesta incorrecta bloqueará la bóveda permanentemente.",
+                 bg=BG_PANEL, fg=TEXT_MUTED, font=FONT_FAINT,
+                 justify="left").pack(anchor="w", pady=(0, 10))
+
+        tk.Frame(frm, bg=BORDER_DARK, height=1).pack(fill="x", pady=(0, 12))
+
+        # Mostrar la pregunta almacenada
+        pregunta = boveda.get("pregunta_seguridad", "Pregunta no disponible.")
+        tk.Label(frm, text=pregunta,
+                 bg=BG_PANEL, fg=ACCENT_GOLD, font=FONT_LABEL,
+                 wraplength=410, justify="left").pack(anchor="w", pady=(0, 8))
+
+        f_resp = NVEntry(frm, label="TU RESPUESTA",
+                         acento=ACCENT_GOLD, ancho_px=410)
+        f_resp.pack(fill="x")
+
+        lbl_err = tk.Label(frm, text="", bg=BG_PANEL, fg=LOCK_RED,
+                           font=FONT_FAINT, wraplength=410)
+        lbl_err.pack(pady=(6, 0))
+
+        def verificar():
+            respuesta = f_resp.get().strip()
+            if not respuesta:
+                lbl_err.config(text="Ingresa tu respuesta.")
+                return
+
+            token = boveda.get("password_cifrada_con_respuesta", "")
+            try:
+                pw_descifrado = descifrar_password_con_respuesta(
+                    token, respuesta, self._uid
+                )
+            except ValueError:
+                # Respuesta incorrecta → bloqueo permanente
+                try:
+                    bloquear_boveda_permanente(self._uid, boveda["id"])
+                except Exception:
+                    pass
+                boveda["boveda_inaccesible"] = True
+                for b in self._bovedas:
+                    if b["id"] == boveda["id"]:
+                        b["boveda_inaccesible"] = True
+                self._renderizar_lista_bovedas()
+                top.destroy()
+                messagebox.showerror(
+                    "Bóveda inaccesible",
+                    f"Respuesta incorrecta.\n\n"
+                    f"«{boveda.get('nombre', '')}» ha sido bloqueada permanentemente.\n"
+                    "Su contenido no puede recuperarse.",
+                    parent=self._root,
+                )
+                return
+
+            # Respuesta correcta → resetear bloqueo y abrir
+            try:
+                resetear_bloqueo_boveda(self._uid, boveda["id"])
+            except Exception:
+                pass
+            boveda["intentos_password"] = 0
+            boveda["boveda_bloqueada"]   = False
+            for b in self._bovedas:
+                if b["id"] == boveda["id"]:
+                    b["intentos_password"] = 0
+                    b["boveda_bloqueada"]   = False
+            self._renderizar_lista_bovedas()
+
+            top.destroy()
+            self._desbloquear_boveda(boveda, pw_descifrado)
+
+        NVButton(frm, texto="✔  VERIFICAR",
+                 acento=ACCENT_GOLD, comando=verificar,
+                 ancho=200, alto=34).pack(pady=(10, 0))
+
+        f_resp._entry.bind("<Return>", lambda _: verificar())
+        f_resp._entry.focus_set()
+
         top.wait_visibility()
         top.grab_set()
 
@@ -663,11 +909,26 @@ class BovedaScreen:
             self._tarjeta_boveda(b)
 
     def _tarjeta_boveda(self, boveda: dict) -> None:
-        es_sel = bool(self._boveda_sel and
-                      self._boveda_sel["id"] == boveda["id"])
-        bg    = BG_CARD    if es_sel else BG_PANEL
-        borde = ACCENT_CYAN if es_sel else BORDER_DARK
-        fg    = TEXT_MAIN  if es_sel else TEXT_MUTED
+        inaccesible = boveda.get("boveda_inaccesible", False)
+        bloqueada   = boveda.get("boveda_bloqueada",   False)
+        es_sel      = bool(self._boveda_sel and
+                           self._boveda_sel["id"] == boveda["id"])
+
+        if inaccesible:
+            bg    = BG_PANEL
+            borde = LOCK_RED
+            fg    = LOCK_RED
+            icono = "⛔"
+        elif bloqueada:
+            bg    = BG_PANEL
+            borde = ACCENT_GOLD
+            fg    = ACCENT_GOLD
+            icono = "🔒"
+        else:
+            bg    = BG_CARD    if es_sel else BG_PANEL
+            borde = ACCENT_CYAN if es_sel else BORDER_DARK
+            fg    = TEXT_MAIN  if es_sel else TEXT_MUTED
+            icono = "⬡"
 
         card = tk.Frame(self._inner_bovedas, bg=bg,
                         highlightthickness=1, highlightbackground=borde,
@@ -677,12 +938,17 @@ class BovedaScreen:
         row = tk.Frame(card, bg=bg)
         row.pack(fill="x", padx=8, pady=7)
 
-        n    = self._conteos.get(boveda["id"], 0)
-        sub  = f"  ({n} {'entrada' if n == 1 else 'entradas'})"
-        lbl = tk.Label(row, text=f"⬡  {boveda.get('nombre', '')}",
+        n   = self._conteos.get(boveda["id"], 0)
+        sub = f"  ({n} {'entrada' if n == 1 else 'entradas'})"
+        if inaccesible:
+            sub = "  [INACCESIBLE]"
+        elif bloqueada:
+            sub = "  [BLOQUEADA]"
+
+        lbl = tk.Label(row, text=f"{icono}  {boveda.get('nombre', '')}",
                        bg=bg, fg=fg, font=FONT_SUBTITLE, anchor="w")
         lbl.pack(side="left", fill="x", expand=True)
-        tk.Label(row, text=sub, bg=bg, fg=TEXT_FAINT,
+        tk.Label(row, text=sub, bg=bg, fg=fg if (inaccesible or bloqueada) else TEXT_FAINT,
                  font=FONT_FAINT).pack(side="right")
 
         def click(b=boveda):
@@ -871,3 +1137,29 @@ class BovedaScreen:
                  ancho=140, alto=30).pack(side="left")
 
         f_correo._entry.focus_set()
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  PERFIL Y CIERRE DE SESIÓN
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _abrir_perfil(self) -> None:
+        """Oculta la bóveda, abre el perfil; al volver se restaura la bóveda."""
+        self._root.withdraw()
+        ProfileScreen(
+            parent       = self._root,
+            datos_usuario= self._datos,
+            on_logout    = self._cerrar_sesion,
+            on_volver    = self._root.deiconify,
+        )
+
+    def _cerrar_sesion(self) -> None:
+        """
+        Destruye la ventana de bóvedas y abre la pantalla de login.
+        Sigue el mismo patrón que PantallaCloud._abrir_app_principal.
+        """
+        self._root.destroy()
+        import tkinter as _tk
+        from views.cloud import PantallaCloud
+        nuevo_root = _tk.Tk()
+        PantallaCloud(nuevo_root)
+        nuevo_root.mainloop()

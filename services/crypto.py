@@ -144,3 +144,60 @@ def descifrar(token: str, fernet: Fernet) -> str:
             "No se pudo descifrar. "
             "El token es inválido o la contraseña de bóveda es incorrecta."
         ) from exc
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  CIFRADO CON RESPUESTA DE SEGURIDAD  (recuperación ante bloqueo)
+# ══════════════════════════════════════════════════════════════════════════
+
+def _derivar_clave_respuesta(respuesta: str, uid: str) -> bytes:
+    """
+    Deriva una clave Fernet a partir de la respuesta de seguridad y el UID.
+    La respuesta se normaliza (minúsculas, sin espacios extremos) para que
+    la verificación sea insensible a mayúsculas y espacios accidentales.
+    """
+    material = respuesta.lower().strip().encode("utf-8")
+    sal      = (uid[:16] if len(uid) >= 16 else uid.ljust(16, "0")).encode()
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=sal,
+        iterations=100_000,
+    )
+    return base64.urlsafe_b64encode(kdf.derive(material))
+
+
+def cifrar_password_con_respuesta(password: str, respuesta: str, uid: str) -> str:
+    """
+    Cifra la contraseña de la bóveda usando la respuesta de seguridad como clave.
+
+    El token resultante se almacena en Firestore y permite recuperar la
+    contraseña cuando el usuario responde correctamente la pregunta de seguridad
+    tras un bloqueo por intentos fallidos.
+
+    Lanza:
+        ValueError si password o respuesta están vacíos.
+    """
+    if not password or not respuesta.strip():
+        raise ValueError("Password y respuesta son obligatorios.")
+    fernet = Fernet(_derivar_clave_respuesta(respuesta, uid))
+    return fernet.encrypt(password.encode("utf-8")).decode("utf-8")
+
+
+def descifrar_password_con_respuesta(token: str, respuesta: str, uid: str) -> str:
+    """
+    Descifra la contraseña de la bóveda usando la respuesta de seguridad.
+
+    Retorna:
+        Contraseña en texto plano si la respuesta es correcta.
+
+    Lanza:
+        ValueError si la respuesta es incorrecta o el token está corrupto.
+    """
+    if not token:
+        raise ValueError("No hay token almacenado.")
+    fernet = Fernet(_derivar_clave_respuesta(respuesta, uid))
+    try:
+        return fernet.decrypt(token.encode("utf-8")).decode("utf-8")
+    except InvalidToken as exc:
+        raise ValueError("Respuesta de seguridad incorrecta.") from exc
